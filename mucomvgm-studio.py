@@ -4,25 +4,30 @@ import configparser
 import json
 import re
 import sys
+import os
+import shutil
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRect, QSize, QProcess
+from PySide6.QtCore import Qt, QRect, QSize, QProcess, QDir, QUrl, QMimeData
 from PySide6.QtGui import (
     QAction, QColor, QFont, QPainter, QTextCharFormat, QSyntaxHighlighter,
     QTextFormat, QKeySequence, QShortcut, QTextDocument, QTextCursor, QPainterPath,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
-    QFileDialog, QFileSystemModel, QFormLayout, QFrame, QHBoxLayout,
+    QFileDialog, QFileSystemModel, QFormLayout, QFrame, QHBoxLayout, QTableView, QAbstractItemView, QMenu,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
-    QSpinBox, QStatusBar, QToolBar, QTreeView, QVBoxLayout, QWidget,
-    QTabWidget, QColorDialog, QCheckBox, QGroupBox, QScrollArea, QTextEdit,
+    QSpinBox, QStatusBar, QVBoxLayout, QWidget,
+    QTabWidget, QColorDialog, QCheckBox, QGroupBox, QScrollArea, QTextEdit, QInputDialog,
 )
 
 APP_NAME = "MUCOMVGM Studio"
 APP_ORG = "WINGGHOST"
-BASE_DIR = Path(__file__).resolve().parent
+# In a PyInstaller one-file build, __file__ points into the temporary extraction
+# directory. Use the executable directory for user-visible files instead.
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "mucomvgm-studio.ini"
+APPDATA_CONFIG_PATH = Path(os.environ.get("APPDATA", str(Path.home() / ".config"))) / APP_ORG / APP_NAME / "mucomvgm-studio.ini"
 LOCALES_DIR = BASE_DIR / "locales"
 
 DEFAULTS = {
@@ -71,7 +76,7 @@ THEMES = {
 TEXT = {
     "Japanese": {
         "file": "ファイル", "edit": "編集", "view": "表示", "tools": "ツール", "help": "ヘルプ",
-        "settings": "設定", "new": "新規作成", "open": "開く…", "save": "保存",
+        "settings": "設定", "new": "新規作成", "open": "開く…", "save": "上書き保存", "save_compile": "保存＆コンパイル",
         "save_as": "名前を付けて保存…", "compile": "コンパイル", "open_folder": "フォルダーを開く…",
         "exit": "終了", "explorer": "エクスプローラー", "output": "出力", "ready": "準備完了",
         "open_mml": "MMLファイルを開く", "mml_files": "MMLファイル (*.muc *.mml);;すべてのファイル (*)",
@@ -96,11 +101,15 @@ TEXT = {
         "apply": "適用", "ok": "OK", "cancel": "キャンセル", "find": "検索", "find_next": "次を検索",
         "find_previous": "前を検索", "find_text": "検索文字列", "not_found": "見つかりません: ",
         "clear_output": "ログをクリア", "undo": "元に戻す", "redo": "やり直し",
-        "cut": "切り取り", "copy": "コピー", "paste": "貼り付け",
+        "cut": "切り取り", "copy": "コピー", "paste": "貼り付け", "select_all": "すべて選択",
+        "back": "戻る", "forward": "進む", "up": "上へ", "refresh": "更新", "new_folder": "新しいフォルダー",
+        "delete": "削除", "rename": "名前の変更", "copy_path": "パスをコピー", "size": "サイズ", "type": "種類", "modified": "更新日時",
+        "confirm_delete": "選択した項目を削除しますか？", "confirm_overwrite": "同名の項目があります。上書きしますか？",
+        "folder_name": "フォルダー名", "rename_prompt": "新しい名前", "file_operation_error": "ファイル操作に失敗しました: ",
     },
     "English": {
         "file": "File", "edit": "Edit", "view": "View", "tools": "Tools", "help": "Help",
-        "settings": "Settings", "new": "New", "open": "Open…", "save": "Save",
+        "settings": "Settings", "new": "New", "open": "Open…", "save": "Overwrite Save", "save_compile": "Save & Compile",
         "save_as": "Save As…", "compile": "Compile", "open_folder": "Open Folder…",
         "exit": "Exit", "explorer": "Explorer", "output": "Output", "ready": "Ready",
         "open_mml": "Open MML File", "mml_files": "MML files (*.muc *.mml);;All files (*)",
@@ -125,6 +134,11 @@ TEXT = {
         "apply": "Apply", "ok": "OK", "cancel": "Cancel", "find": "Find", "find_next": "Find Next",
         "find_previous": "Find Previous", "find_text": "Search text", "not_found": "Not found: ",
         "clear_output": "Clear Log", "undo": "Undo", "redo": "Redo", "cut": "Cut", "copy": "Copy", "paste": "Paste",
+        "select_all": "Select All", "back": "Back", "forward": "Forward", "up": "Up", "refresh": "Refresh",
+        "new_folder": "New Folder", "delete": "Delete", "rename": "Rename", "copy_path": "Copy Path",
+        "size": "Size", "type": "Type", "modified": "Date Modified", "confirm_delete": "Delete the selected items?",
+        "confirm_overwrite": "An item with the same name exists. Overwrite it?", "folder_name": "Folder name",
+        "rename_prompt": "New name", "file_operation_error": "File operation failed: ",
     },
 }
 COLOR_KEYS = [
@@ -133,21 +147,53 @@ COLOR_KEYS = [
     "parameter", "macro", "number",
 ]
 
+def _safe_int(config, section, option, fallback, minimum=None, maximum=None):
+    try:
+        value = config.getint(section, option, fallback=fallback)
+    except (ValueError, configparser.Error):
+        value = fallback
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _safe_bool(config, section, option, fallback):
+    try:
+        return config.getboolean(section, option, fallback=fallback)
+    except (ValueError, configparser.Error):
+        return fallback
+
+
 def read_config():
     config = configparser.ConfigParser()
-    if CONFIG_PATH.exists():
+    existing_configs = [p for p in (CONFIG_PATH, APPDATA_CONFIG_PATH) if p.exists()]
+    config_path = max(existing_configs, key=lambda p: p.stat().st_mtime) if existing_configs else CONFIG_PATH
+    if config_path.exists():
         try:
-            config.read(CONFIG_PATH, encoding="utf-8")
+            config.read(config_path, encoding="utf-8")
         except (OSError, configparser.Error):
             pass
     values = {
         "language": config.get("General", "language", fallback=DEFAULTS["language"]),
         "compiler_path": config.get("General", "compiler_path", fallback=DEFAULTS["compiler_path"]),
+        "explorer_path": config.get("General", "explorer_path", fallback=str(Path.cwd())),
         "theme": config.get("Appearance", "theme", fallback=DEFAULTS["theme"]),
-        "font_size": config.getint("Appearance", "font_size", fallback=int(DEFAULTS["font_size"])),
-        "show_line_numbers": config.getboolean("Appearance", "show_line_numbers", fallback=True),
-        "show_ruler": config.getboolean("Appearance", "show_ruler", fallback=True),
-        "show_current_line_underline": config.getboolean("Appearance", "show_current_line_underline", fallback=True),
+        "font_size": _safe_int(config, "Appearance", "font_size", int(DEFAULTS["font_size"]), 7, 36),
+        "show_line_numbers": _safe_bool(config, "Appearance", "show_line_numbers", True),
+        "show_ruler": _safe_bool(config, "Appearance", "show_ruler", True),
+        "show_current_line_underline": _safe_bool(config, "Appearance", "show_current_line_underline", True),
+        "window_geometry": config.get("Window", "geometry", fallback=""),
+        "window_state": config.get("Window", "state", fallback=""),
+        "explorer_width": _safe_int(config, "Window", "explorer_width", 280, 160, 1200),
+        "output_height": _safe_int(config, "Window", "output_height", 180, 80, 900),
+        "explorer_sort_column": _safe_int(config, "Explorer", "sort_column", 0, 0, 3),
+        "explorer_sort_order": config.get("Explorer", "sort_order", fallback="ascending"),
+        "explorer_column_widths": [
+            _safe_int(config, "Explorer", f"column_width_{i}", default, 40, 2000)
+            for i, default in enumerate((190, 85, 100, 160))
+        ],
         "colors": dict(DEFAULTS["colors"]),
     }
     for key in COLOR_KEYS:
@@ -159,6 +205,7 @@ def write_config(values):
     config["General"] = {
         "language": str(values["language"]),
         "compiler_path": str(values["compiler_path"]),
+        "explorer_path": str(values.get("explorer_path", Path.cwd())),
     }
     config["Appearance"] = {
         "theme": str(values["theme"]),
@@ -168,12 +215,30 @@ def write_config(values):
         "show_current_line_underline": str(values["show_current_line_underline"]).lower(),
     }
     config["Colors"] = {key: str(values["colors"].get(key, DEFAULTS["colors"][key])) for key in COLOR_KEYS}
+    config["Window"] = {
+        "geometry": str(values.get("window_geometry", "")),
+        "state": str(values.get("window_state", "")),
+        "explorer_width": str(values.get("explorer_width", 280)),
+        "output_height": str(values.get("output_height", 180)),
+    }
+    config["Explorer"] = {
+        "sort_column": str(values.get("explorer_sort_column", 0)),
+        "sort_order": str(values.get("explorer_sort_order", "ascending")),
+    }
+    for i, width in enumerate(values.get("explorer_column_widths", [190, 85, 100, 160])):
+        config["Explorer"][f"column_width_{i}"] = str(width)
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open("w", encoding="utf-8") as stream:
             config.write(stream)
+        return CONFIG_PATH
     except OSError:
-        # The UI remains usable if the directory is read-only; caller can report if needed.
-        pass
+        # Executables installed in protected folders (e.g. Program Files) cannot
+        # write beside themselves; persist settings in the user's roaming profile.
+        APPDATA_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with APPDATA_CONFIG_PATH.open("w", encoding="utf-8") as stream:
+            config.write(stream)
+        return APPDATA_CONFIG_PATH
 
 class MmlHighlighter(QSyntaxHighlighter):
     """Lightweight highlighter: deliberately leaves note letters uncolored."""
@@ -251,6 +316,8 @@ class MmlEditor(QPlainTextEdit):
         self.current_line_overlay = CurrentLineOverlay(self)
         self.setFont(self.make_font())
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.blockCountChanged.connect(self.update_line_number_width)
         self.updateRequest.connect(self.update_line_number_area)
         self.cursorPositionChanged.connect(self.update_extra_selections)
@@ -531,6 +598,98 @@ class SettingsDialog(QDialog):
         if self.on_apply:
             self.on_apply(self.values)
 
+class ExplorerFileSystemModel(QFileSystemModel):
+    """Filesystem model with human-readable sizes and a dash for directories."""
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            owner = self.parent()
+            labels = ["name", "size", "type", "modified"]
+            if 0 <= section < len(labels) and hasattr(owner, "tr"):
+                return owner.tr(labels[section])
+        return super().headerData(section, orientation, role)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and index.isValid() and index.column() == 1:
+            info = self.fileInfo(index)
+            if info.isDir():
+                return "—"
+            size = info.size()
+            if size < 1024:
+                return f"{size} B"
+            if size < 1024 ** 2:
+                return f"{size / 1024:.1f} KB"
+            if size < 1024 ** 3:
+                return f"{size / (1024 ** 2):.1f} MB"
+            return f"{size / (1024 ** 3):.2f} GB"
+        return super().data(index, role)
+
+
+class ExplorerTable(QTableView):
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.owner.explorer_context_menu)
+        self.doubleClicked.connect(self.owner.open_explorer_item)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            dest = self.owner.project_root
+            paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+            mods = event.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                move = True
+            elif mods & Qt.KeyboardModifier.ControlModifier:
+                move = False
+            else:
+                try:
+                    dest_drive = Path(dest).drive.casefold()
+                    source_drives = {p.drive.casefold() for p in paths}
+                    move = bool(dest_drive and source_drives == {dest_drive})
+                except Exception:
+                    move = False
+            self.owner.copy_paths_to(paths, dest, move=move)
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_C:
+            self.owner.explorer_copy(cut=False); return
+        if mods & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_X:
+            self.owner.explorer_copy(cut=True); return
+        if mods & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_V:
+            self.owner.explorer_paste(); return
+        if key == Qt.Key.Key_Delete:
+            self.owner.explorer_delete(); return
+        if key == Qt.Key.Key_F2:
+            self.owner.explorer_rename(); return
+        if key == Qt.Key.Key_Backspace:
+            self.owner.navigate_up(); return
+        super().keyPressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -544,7 +703,27 @@ class MainWindow(QMainWindow):
         self.retranslate()
         self.apply_settings()
         self.new_file()
+        saved_explorer = Path(self.values.get("explorer_path", str(Path.cwd())))
+        initial_explorer = saved_explorer if saved_explorer.exists() and saved_explorer.is_dir() else Path.cwd()
+        self.set_explorer_path(initial_explorer, add_history=True)
         self.resize(1200, 780)
+        geometry = self.values.get("window_geometry", "")
+        if geometry:
+            try:
+                self.restoreGeometry(bytes.fromhex(geometry))
+            except (ValueError, TypeError):
+                pass
+        state = self.values.get("window_state", "")
+        if state:
+            try:
+                self.restoreState(bytes.fromhex(state))
+            except (ValueError, TypeError):
+                pass
+        for i, width in enumerate(self.values.get("explorer_column_widths", [])):
+            if i < self.explorer_table.model().columnCount():
+                self.explorer_table.setColumnWidth(i, width)
+        order = Qt.SortOrder.DescendingOrder if self.values.get("explorer_sort_order") == "descending" else Qt.SortOrder.AscendingOrder
+        self.explorer_table.sortByColumn(self.values.get("explorer_sort_column", 0), order)
 
     def tr(self, key):
         return TEXT.get(self.language, TEXT["Japanese"]).get(key, TEXT["Japanese"].get(key, key))
@@ -555,17 +734,46 @@ class MainWindow(QMainWindow):
         self.editor.cursorPositionChanged.connect(self.update_cursor_status)
         self.setCentralWidget(self.editor)
 
-        self.file_model = QFileSystemModel(self)
-        self.file_model.setNameFilters(["*.muc", "*.mml", "*.vgm", "*.dat", "*.bin", "*.txt"])
-        self.file_model.setNameFilterDisables(False)
-        self.tree = QTreeView()
-        self.tree.setModel(self.file_model)
-        self.tree.doubleClicked.connect(self.open_tree_item)
-        self.tree.setHeaderHidden(True)
-        for col in range(1, 4):
-            self.tree.hideColumn(col)
+        self.clipboard_paths = []
+        self.clipboard_cut = False
+        self.history = []
+        self.history_index = -1
+        self.file_model = ExplorerFileSystemModel(self)
+        self.file_model.setFilter(QDir.Filter.AllEntries | QDir.Filter.NoDotAndDotDot | QDir.Filter.AllDirs | QDir.Filter.Files)
+        self.file_model.setReadOnly(False)
+        self.explorer_panel = QWidget()
+        explorer_layout = QVBoxLayout(self.explorer_panel)
+        explorer_layout.setContentsMargins(4, 4, 4, 4)
+        nav = QHBoxLayout()
+        self.back_button = QPushButton("←")
+        self.forward_button = QPushButton("→")
+        self.up_button = QPushButton("↑")
+        self.refresh_button = QPushButton("⟳")
+        for button, slot in ((self.back_button, self.navigate_back), (self.forward_button, self.navigate_forward),
+                             (self.up_button, self.navigate_up), (self.refresh_button, self.refresh_explorer)):
+            button.setMaximumWidth(34)
+            button.clicked.connect(slot)
+            nav.addWidget(button)
+        self.path_edit = QLineEdit(str(self.project_root))
+        self.path_edit.returnPressed.connect(self.navigate_to_path)
+        nav.addWidget(self.path_edit, 1)
+        explorer_layout.addLayout(nav)
+        self.explorer_table = ExplorerTable(self)
+        self.explorer_table.setModel(self.file_model)
+        self.explorer_table.setSortingEnabled(True)
+        self.explorer_table.setAlternatingRowColors(False)
+        self.explorer_table.verticalHeader().setVisible(False)
+        self.explorer_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.explorer_table.horizontalHeader().setStretchLastSection(True)
+        self.explorer_table.setColumnWidth(0, 190)
+        self.explorer_table.setColumnWidth(1, 85)
+        self.explorer_table.setColumnWidth(2, 100)
+        self.explorer_table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        explorer_layout.addWidget(self.explorer_table, 1)
+        self.file_model.setRootPath(str(self.project_root))
+        self.explorer_table.setRootIndex(self.file_model.index(str(self.project_root)))
         self.explorer_dock = QDockWidget(self)
-        self.explorer_dock.setWidget(self.tree)
+        self.explorer_dock.setWidget(self.explorer_panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.explorer_dock)
 
         self.output_log = QPlainTextEdit()
@@ -574,20 +782,14 @@ class MainWindow(QMainWindow):
         self.output_dock = QDockWidget(self)
         self.output_dock.setWidget(self.output_log)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.output_dock)
+        # Keep the bottom-left corner occupied by the Explorer dock so it extends
+        # to the bottom while Output spans only the editor side.
+        self.setCorner(Qt.Corner.BottomLeftCorner, Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.setDockNestingEnabled(True)
 
-        toolbar = QToolBar()
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
         self.actions = {}
-        for key, callback in (("new", self.new_file), ("open", self.open_file),
-                              ("save", self.save_file), ("compile", self.compile_file)):
-            action = QAction(self)
-            action.triggered.connect(callback)
-            toolbar.addAction(action)
-            self.actions[key] = action
         self.action_settings = QAction(self)
         self.action_settings.triggered.connect(self.open_settings)
-        toolbar.addAction(self.action_settings)
 
         self.status_label = QLabel()
         self.cursor_label = QLabel()
@@ -602,8 +804,15 @@ class MainWindow(QMainWindow):
         self.menu_view = bar.addMenu("")
         self.menu_tools = bar.addMenu("")
         self.menu_help = bar.addMenu("")
-        for key in ("new", "open", "save", "compile"):
-            self.menu_file.addAction(self.actions[key])
+        for key, callback, shortcut in (("new", self.new_file, "Ctrl+N"), ("open", self.open_file, "Ctrl+O"),
+                                        ("save", self.save_file, "Ctrl+Shift+S"), ("save_compile", self.save_and_compile, "Ctrl+S"),
+                                        ("compile", self.compile_file, "F5")):
+            action = QAction(self)
+            action.triggered.connect(callback)
+            action.setShortcut(QKeySequence(shortcut))
+            self.menu_file.addAction(action)
+            self.actions[key] = action
+        self.menu_file.addSeparator()
         self.action_save_as = QAction(self)
         self.action_save_as.triggered.connect(self.save_file_as)
         self.menu_file.addAction(self.action_save_as)
@@ -613,12 +822,21 @@ class MainWindow(QMainWindow):
         self.action_exit = QAction(self)
         self.action_exit.triggered.connect(self.close)
         self.menu_file.addAction(self.action_exit)
-        for key, callback in (("undo", self.editor.undo), ("redo", self.editor.redo),
-                              ("cut", self.editor.cut), ("copy", self.editor.copy), ("paste", self.editor.paste)):
+        edit_items = (("undo", self.editor.undo, "Ctrl+Z"), ("redo", self.editor.redo, "Ctrl+Y"),
+                      ("cut", self.editor.cut, "Ctrl+X"), ("copy", self.editor.copy, "Ctrl+C"),
+                      ("paste", self.editor.paste, "Ctrl+V"), ("select_all", self.editor.selectAll, "Ctrl+A"))
+        for key, callback, shortcut in edit_items:
             action = QAction(self)
             action.triggered.connect(callback)
+            action.setShortcut(QKeySequence(shortcut))
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self.menu_edit.addAction(action)
             self.actions[key] = action
+        self.menu_edit.addSeparator()
+        self.action_find = QAction(self)
+        self.action_find.setShortcut(QKeySequence.StandardKey.Find)
+        self.action_find.triggered.connect(self.open_find)
+        self.menu_edit.addAction(self.action_find)
         self.menu_view.addAction(self.explorer_dock.toggleViewAction())
         self.menu_view.addAction(self.output_dock.toggleViewAction())
         self.menu_tools.addAction(self.action_settings)
@@ -629,8 +847,6 @@ class MainWindow(QMainWindow):
         self.action_about.triggered.connect(lambda: QMessageBox.about(self, self.tr("about_title"), self.tr("about")))
         self.menu_help.addAction(self.action_about)
 
-        self.find_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
-        self.find_shortcut.activated.connect(self.open_find)
         self.find_next_shortcut = QShortcut(QKeySequence("F3"), self)
         self.find_next_shortcut.activated.connect(lambda: self.find_text(False))
         self.find_prev_shortcut = QShortcut(QKeySequence("Shift+F3"), self)
@@ -653,6 +869,11 @@ class MainWindow(QMainWindow):
         self.action_settings.setText(self.tr("settings"))
         self.action_clear_output.setText(self.tr("clear_output"))
         self.action_about.setText(self.tr("about_title"))
+        self.action_find.setText(self.tr("find"))
+        self.back_button.setToolTip(self.tr("back"))
+        self.forward_button.setToolTip(self.tr("forward"))
+        self.up_button.setToolTip(self.tr("up"))
+        self.refresh_button.setToolTip(self.tr("refresh"))
         self.explorer_dock.setWindowTitle(self.tr("explorer"))
         self.output_dock.setWindowTitle(self.tr("output"))
         self.status_label.setText(self.tr("ready"))
@@ -740,15 +961,26 @@ class MainWindow(QMainWindow):
         self.project_root = self.current_file.parent
         self.editor.setPlainText(content)
         self.editor.document().setModified(False)
-        self.file_model.setRootPath(str(self.project_root))
-        self.tree.setRootIndex(self.file_model.index(str(self.project_root)))
+        self.set_explorer_path(self.project_root, add_history=True)
         self.update_title()
         self.status_label.setText(str(self.current_file))
 
-    def open_tree_item(self, index):
+    def open_explorer_item(self, index):
         path = Path(self.file_model.filePath(index))
-        if path.is_file() and path.suffix.lower() in (".muc", ".mml"):
+        if path.is_dir():
+            self.set_explorer_path(path, add_history=True)
+        elif path.suffix.lower() in (".muc", ".mml"):
             self.load_file(path)
+        else:
+            try:
+                if sys.platform == "win32":
+                    os_startfile = getattr(__import__("os"), "startfile")
+                    os_startfile(str(path))
+                else:
+                    import subprocess
+                    subprocess.Popen(["xdg-open", str(path)])
+            except Exception as exc:
+                QMessageBox.warning(self, APP_NAME, str(exc))
 
     def save_file(self):
         if self.current_file is None:
@@ -773,17 +1005,165 @@ class MainWindow(QMainWindow):
             target = target.with_suffix(".muc")
         self.current_file = target.resolve()
         self.project_root = self.current_file.parent
-        self.file_model.setRootPath(str(self.project_root))
-        self.tree.setRootIndex(self.file_model.index(str(self.project_root)))
+        self.set_explorer_path(self.project_root, add_history=True)
         return self.save_file()
 
     def open_folder(self):
         path = QFileDialog.getExistingDirectory(self, self.tr("open_folder"), str(self.project_root))
         if path:
-            self.project_root = Path(path)
-            self.file_model.setRootPath(path)
-            self.tree.setRootIndex(self.file_model.index(path))
-            self.status_label.setText(path)
+            self.set_explorer_path(Path(path), add_history=True)
+
+    def set_explorer_path(self, path, add_history=False):
+        path = Path(path).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            QMessageBox.warning(self, APP_NAME, str(path))
+            return False
+        self.project_root = path
+        self.values["explorer_path"] = str(path)
+        self.file_model.setRootPath(str(path))
+        self.explorer_table.setRootIndex(self.file_model.index(str(path)))
+        self.path_edit.setText(str(path))
+        if add_history:
+            if self.history_index < 0 or self.history[self.history_index] != path:
+                self.history = self.history[:self.history_index + 1]
+                self.history.append(path)
+                self.history_index = len(self.history) - 1
+        self.back_button.setEnabled(self.history_index > 0)
+        self.forward_button.setEnabled(self.history_index >= 0 and self.history_index < len(self.history) - 1)
+        self.status_label.setText(str(path))
+        return True
+
+    def navigate_to_path(self):
+        self.set_explorer_path(Path(self.path_edit.text()), add_history=True)
+
+    def navigate_back(self):
+        if self.history_index > 0:
+            self.history_index -= 1
+            self.set_explorer_path(self.history[self.history_index])
+
+    def navigate_forward(self):
+        if self.history_index + 1 < len(self.history):
+            self.history_index += 1
+            self.set_explorer_path(self.history[self.history_index])
+
+    def navigate_up(self):
+        parent = self.project_root.parent
+        if parent != self.project_root:
+            self.set_explorer_path(parent, add_history=True)
+
+    def refresh_explorer(self):
+        path = self.project_root
+        self.file_model.setRootPath("")
+        self.file_model.setRootPath(str(path))
+        self.explorer_table.setRootIndex(self.file_model.index(str(path)))
+
+    def selected_paths(self):
+        rows = self.explorer_table.selectionModel().selectedRows(0)
+        return [Path(self.file_model.filePath(index)) for index in rows]
+
+    def explorer_context_menu(self, pos):
+        menu = QMenu(self)
+        selected = self.selected_paths()
+        new_folder = menu.addAction(self.tr("new_folder"))
+        rename = menu.addAction(self.tr("rename"))
+        delete = menu.addAction(self.tr("delete"))
+        menu.addSeparator()
+        copy = menu.addAction(self.tr("copy"))
+        cut = menu.addAction(self.tr("cut"))
+        paste = menu.addAction(self.tr("paste"))
+        copy_path = menu.addAction(self.tr("copy_path"))
+        rename.setEnabled(len(selected) == 1)
+        delete.setEnabled(bool(selected))
+        copy.setEnabled(bool(selected)); cut.setEnabled(bool(selected))
+        paste.setEnabled(bool(self.clipboard_paths) or QApplication.clipboard().mimeData().hasUrls())
+        copy_path.setEnabled(bool(selected))
+        chosen = menu.exec(self.explorer_table.viewport().mapToGlobal(pos))
+        if chosen == new_folder: self.explorer_new_folder()
+        elif chosen == rename: self.explorer_rename()
+        elif chosen == delete: self.explorer_delete()
+        elif chosen == copy: self.explorer_copy(False)
+        elif chosen == cut: self.explorer_copy(True)
+        elif chosen == paste: self.explorer_paste()
+        elif chosen == copy_path and selected: QApplication.clipboard().setText(str(selected[0]))
+
+    def explorer_new_folder(self):
+        name, ok = QInputDialog.getText(self, self.tr("new_folder"), self.tr("folder_name"))
+        if ok and name.strip():
+            target = self.project_root / name.strip()
+            try:
+                target.mkdir()
+                self.refresh_explorer()
+            except OSError as exc:
+                QMessageBox.warning(self, APP_NAME, self.tr("file_operation_error") + str(exc))
+
+    def explorer_rename(self):
+        selected = self.selected_paths()
+        if len(selected) != 1: return
+        source = selected[0]
+        name, ok = QInputDialog.getText(self, self.tr("rename"), self.tr("rename_prompt"), text=source.name)
+        if not ok or not name.strip() or name.strip() == source.name: return
+        target = source.with_name(name.strip())
+        if target.exists():
+            QMessageBox.warning(self, APP_NAME, self.tr("confirm_overwrite")); return
+        try:
+            source.rename(target); self.refresh_explorer()
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, self.tr("file_operation_error") + str(exc))
+
+    def explorer_delete(self):
+        paths = self.selected_paths()
+        if not paths: return
+        if QMessageBox.question(self, APP_NAME, self.tr("confirm_delete"), QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            for path in paths:
+                if path.is_dir(): shutil.rmtree(path)
+                else: path.unlink()
+            self.refresh_explorer()
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, self.tr("file_operation_error") + str(exc))
+
+    def explorer_copy(self, cut=False):
+        paths = self.selected_paths()
+        if not paths: return
+        self.clipboard_paths = paths
+        self.clipboard_cut = cut
+        mime = QMimeData(); mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        QApplication.clipboard().setMimeData(mime)
+
+    def explorer_paste(self):
+        mime = QApplication.clipboard().mimeData()
+        paths = list(self.clipboard_paths)
+        cut = self.clipboard_cut
+        if not paths and mime.hasUrls():
+            paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+            cut = False
+        if paths:
+            self.copy_paths_to(paths, self.project_root, move=cut)
+            if cut:
+                self.clipboard_paths = []; self.clipboard_cut = False
+
+    def copy_paths_to(self, sources, destination, move=False):
+        destination = Path(destination)
+        for source in sources:
+            try:
+                if not source.exists(): continue
+                target = destination / source.name
+                if source.resolve() == target.resolve(): continue
+                if target.exists():
+                    answer = QMessageBox.question(self, APP_NAME, self.tr("confirm_overwrite") + "\n" + str(target), QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+                    if answer != QMessageBox.StandardButton.Yes: continue
+                    if target.is_dir(): shutil.rmtree(target)
+                    else: target.unlink()
+                if move:
+                    shutil.move(str(source), str(target))
+                elif source.is_dir():
+                    shutil.copytree(source, target)
+                else:
+                    shutil.copy2(source, target)
+            except OSError as exc:
+                QMessageBox.warning(self, APP_NAME, self.tr("file_operation_error") + str(exc))
+        self.refresh_explorer()
 
     def open_find(self):
         dialog = QDialog(self)
@@ -824,11 +1204,15 @@ class MainWindow(QMainWindow):
         if not found:
             self.status_label.setText(self.tr("not_found") + term)
 
-    def compile_file(self):
+    def save_and_compile(self):
+        if self.save_file():
+            self.compile_file(skip_save=True)
+
+    def compile_file(self, skip_save=False):
         if self.process and self.process.state() != QProcess.ProcessState.NotRunning:
             self.log(self.tr("compile_running"))
             return
-        if not self.save_file() or self.current_file is None:
+        if (not skip_save and not self.save_file()) or self.current_file is None:
             return
         compiler = Path(self.values["compiler_path"]).expanduser()
         candidates = [self.current_file.parent / "mucomvgm.exe", BASE_DIR / "mucomvgm.exe"]
@@ -871,8 +1255,30 @@ class MainWindow(QMainWindow):
         self.process = None
 
     def closeEvent(self, event):
-        write_config(self.values)
-        event.accept() if self.confirm_save_if_dirty() else event.ignore()
+        if not self.confirm_save_if_dirty():
+            event.ignore()
+            return
+        self.values["explorer_path"] = str(self.project_root)
+        self.values["window_geometry"] = bytes(self.saveGeometry()).hex()
+        self.values["window_state"] = bytes(self.saveState()).hex()
+        self.values["explorer_width"] = self.explorer_dock.width()
+        self.values["output_height"] = self.output_dock.height()
+        self.values["explorer_sort_column"] = self.explorer_table.horizontalHeader().sortIndicatorSection()
+        self.values["explorer_sort_order"] = (
+            "descending" if self.explorer_table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+            else "ascending"
+        )
+        self.values["explorer_column_widths"] = [
+            self.explorer_table.columnWidth(i) for i in range(self.explorer_table.model().columnCount())
+        ]
+        try:
+            saved_to = write_config(self.values)
+            self.log(f"Settings saved: {saved_to}")
+        except OSError as exc:
+            QMessageBox.warning(self, APP_NAME, f"設定を保存できませんでした: {exc}")
+            event.ignore()
+            return
+        event.accept()
 
 def main():
     app = QApplication(sys.argv)
