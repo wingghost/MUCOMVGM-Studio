@@ -1,29 +1,150 @@
-# MUCOMVGM Studio (MVS)
+# MUCOMVGM Studio（MVS）
 
-Windows-oriented MML authoring IDE for the MUCOMVGM compiler.
+MUCOMVGM Studio（MVS）は、Windows で MUCOMVGM 用の MML を編集し、`mucomvgm.exe` を呼び出してコンパイルするための GUI アプリケーションです。
 
-## Run (Windows / PowerShell)
+> **開発中のソフトウェアです。** 実際の MUCOMVGM コンパイラを使った Windows 環境で、すべての動作が検証済みというわけではありません。コンパイラ本体 `mucomvgm.exe` はこのリポジトリには同梱されていません。
+
+## 目次
+
+- [必要なもの](#必要なもの)
+- [起動方法](#起動方法)
+- [基本的な使い方](#基本的な使い方)
+- [メニューとショートカット](#メニューとショートカット)
+- [エクスプローラーの使い方](#エクスプローラーの使い方)
+- [設定](#設定)
+- [INI ファイルについて](#ini-ファイルについて)
+- [コンパイルできないとき](#コンパイルできないとき)
+- [主な機能と注意事項](#主な機能と注意事項)
+
+## 必要なもの
+
+- Windows
+- Python 3
+- PySide6（`requirements.txt` からインストールできます）
+- MUCOMVGM コンパイラ `mucomvgm.exe`（別途用意してください）
+
+## 起動方法
+
+PowerShell を開き、プロジェクトのフォルダーに移動して、次のコマンドを順番に実行します。
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python mucomvgm-studio.py
+python .\mucomvgm-studio.py
 ```
 
-Use **Settings / 設定** to choose the UI language, editor theme, font size, display options, syntax colors, and `mucomvgm.exe` path. Settings are saved to `mucomvgm-studio.ini` beside the application script. The INI file is generated at runtime and intentionally ignored by Git.
+PowerShell の実行ポリシーによって仮想環境の有効化が拒否される場合は、現在の PowerShell セッションに限って、次のコマンドを実行してから有効化してください。
 
-## Current features in this working draft
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
 
-- Japanese and English UI with immediate language switching from Settings.
-- Light, dark, system and custom theme selection.
-- Configurable editor font size; Ctrl+mouse wheel zooms in/out.
-- Line-number gutter, current-line underline, and a ruler marked every 10 columns.
-- Lightweight syntax highlighting for comments, directives, command/parameter tokens, macros and numeric values; note letters are intentionally not specially colored.
-- Find dialog (Ctrl+F), next (F3), previous (Shift+F3).
-- Compiler executable path setting and compile output panel.
-- Settings persisted to `mucomvgm-studio.ini`.
+すでに仮想環境と必要なライブラリを準備している場合は、最後の起動コマンドだけで実行できます。
 
-## Important notes
+## 基本的な使い方
 
-This is a working draft, not yet verified end-to-end on Windows with a real MUCOMVGM compiler. The highlighter is heuristic and should be refined against actual MUCOMVGM MML syntax examples. Compilation is delegated to `mucomvgm.exe`, which is not bundled here.
+### 1. MML ファイルを開く／新規作成する
+
+- **ファイル → 新規作成**（`Ctrl+N`）で編集用の新しいファイルを作成します。
+- **ファイル → 開く**（`Ctrl+O`）で既存の MML ファイルを開きます。
+- 編集したファイルは **ファイル → 名前を付けて保存** で保存先やファイル名を指定できます。
+- **ファイル → 上書き保存**（`Ctrl+Shift+S`）で、現在のファイルに上書き保存します。
+
+### 2. MML を編集する
+
+中央のエディターで MML を編集します。行番号、ルーラー、現在行の下線、構文の簡易ハイライトなどを利用できます。検索は **編集 → 検索**（`Ctrl+F`）から行えます。
+
+### 3. コンパイラを設定する
+
+初回起動時やコンパイラが見つからない場合は、**ツール → 設定** を開き、`mucomvgm.exe` の場所を指定してください。設定画面の参照ボタンから実行ファイルを選択できます。
+
+### 4. 保存してコンパイルする
+
+- **ファイル → 保存＆コンパイル**（`Ctrl+S`）で、現在の MML を保存してからコンパイルします。
+- **ファイル → コンパイル**（`F5`）でコンパイルを実行します。
+- コンパイルのメッセージやエラーは、画面下部の **出力** パネルで確認します。
+- 正常終了しても、想定された `.vgm` ファイルが見つからない場合は、出力パネルのメッセージとコンパイラの設定・出力先を確認してください。
+
+## メニューとショートカット
+
+| 操作 | ショートカット | 説明 |
+|---|---|---|
+| 新規作成 | `Ctrl+N` | 新しい編集ファイルを作成 |
+| 開く | `Ctrl+O` | ファイルを開く |
+| 保存＆コンパイル | `Ctrl+S` | 保存してからコンパイル |
+| 上書き保存 | `Ctrl+Shift+S` | 現在のファイルを保存 |
+| コンパイル | `F5` | コンパイルを実行 |
+| 元に戻す | `Ctrl+Z` | 直前の編集を取り消す |
+| やり直す | `Ctrl+Y` | 取り消した編集をやり直す |
+| 切り取り | `Ctrl+X` | 選択範囲を切り取る |
+| コピー | `Ctrl+C` | 選択範囲をコピー |
+| 貼り付け | `Ctrl+V` | クリップボードの内容を貼り付け |
+| すべて選択 | `Ctrl+A` | エディターの内容をすべて選択 |
+| 検索 | `Ctrl+F` | 検索ダイアログを開く |
+| 次を検索 | `F3` | 次の一致箇所へ移動 |
+| 前を検索 | `Shift+F3` | 前の一致箇所へ移動 |
+| フォントを拡大 | `Ctrl++` | エディターの文字を大きくする |
+| フォントを縮小 | `Ctrl+-` | エディターの文字を小さくする |
+
+## エクスプローラーの使い方
+
+画面の **エクスプローラー** パネルでは、作業フォルダー内のファイルやフォルダーを操作できます。
+
+- フォルダーをダブルクリックすると、そのフォルダーに移動します。
+- `.muc` ファイルをダブルクリックすると、エディターで開きます。
+- 一覧上で右クリックすると、利用可能なファイル操作メニューが表示されます。
+- コンテキストメニューからフォルダーの新規作成、名前の変更、削除、コピー、切り取り、貼り付け、パスのコピーなどを行えます。
+- フォルダーを開く操作から、作業対象のフォルダーを指定できます。
+
+ファイルの削除や上書きなど、取り消しにくい操作を行う前には、対象を確認してください。
+
+## 設定
+
+**ツール → 設定** では、次の項目を変更できます。
+
+- **言語**：日本語／英語
+- **テーマ**：システム、ライト、ダーク、カスタム
+- **フォントサイズ**：エディターの文字サイズ
+- **コンパイラのパス**：`mucomvgm.exe` の場所
+- **表示オプション**：行番号、ルーラー、現在行の下線の表示／非表示
+- **配色**：エディター背景・文字、行番号、ルーラー、構文ハイライトなどの色
+
+「適用」は設定を反映し、「OK」は設定を確定してダイアログを閉じます。「キャンセル」はダイアログ内で未適用の変更を破棄します。
+
+## INI ファイルについて
+
+設定は `mucomvgm-studio.ini` に保存され、次回起動時に読み込まれます。通常はアプリケーションのスクリプトと同じフォルダーに作成されます。そこへ書き込めない場合は、ユーザーの `AppData\Roaming` 配下への保存が試みられます。
+
+INI ファイルは実行時に生成される設定ファイルであり、Git の管理対象外です。設定を初期状態に戻したい場合は、アプリケーションを終了してから INI ファイルを別の場所へ退避するか、削除してください。削除すると保存済みの設定も失われます。
+
+## コンパイルできないとき
+
+1. **設定** で `mucomvgm.exe` のパスが正しいか確認します。
+2. 指定した場所に `mucomvgm.exe` が実際に存在するか確認します。
+3. **出力** パネルに表示されたメッセージやエラーを確認します。
+4. 入力した MML と、使用している MUCOMVGM コンパイラのバージョン・仕様を確認します。
+5. `.vgm` ファイルが出力されない場合は、コンパイラのメッセージと出力先を確認してください。
+
+MVS は外部の `mucomvgm.exe` を呼び出してコンパイルします。コンパイラ本体がない場合、MVS 単体ではコンパイルできません。
+
+## 主な機能と注意事項
+
+- 日本語／英語の UI と、設定画面からの言語切り替え
+- システム／ライト／ダーク／カスタムテーマ
+- エディターのフォントサイズ変更（マウスホイール操作にも対応）
+- 行番号、現在行の下線、10 桁ごとのルーラー
+- コメント、ディレクティブ、コマンド／パラメーター、マクロ、数値などの簡易構文ハイライト
+- 検索、コンパイル出力パネル、INI による設定保存
+
+構文ハイライトは簡易的な判定であり、すべての MML 構文を完全に解析するものではありません。実際の MUCOMVGM コンパイラを使った Windows 上での一連の動作は、利用環境で確認してください。
+
+## ライセンス
+
+MIT License。詳細は LICENSE.txt を見てください。
+
+## 更新履歴
+
+2026/10/10 Ver.0.0.1  
+    - 初回リリース  
