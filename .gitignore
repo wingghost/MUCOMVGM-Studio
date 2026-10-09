@@ -1,7 +1,4 @@
+.venv/
 __pycache__/
 *.py[cod]
-.venv/
-build/
-dist/
-*.spec
-*.vgm
+mucomvgm-studio.ini
