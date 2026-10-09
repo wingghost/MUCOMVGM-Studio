@@ -6,7 +6,6 @@ MUCOMVGM Studio（MVS）は、Windows で MUCOMVGM 用の MML を編集し、`mu
 
 ## 目次
 
-- [必要なもの](#必要なもの)
 - [起動方法](#起動方法)
 - [基本的な使い方](#基本的な使い方)
 - [メニューとショートカット](#メニューとショートカット)
@@ -16,32 +15,9 @@ MUCOMVGM Studio（MVS）は、Windows で MUCOMVGM 用の MML を編集し、`mu
 - [コンパイルできないとき](#コンパイルできないとき)
 - [主な機能と注意事項](#主な機能と注意事項)
 
-## 必要なもの
-
-- Windows
-- Python 3
-- PySide6（`requirements.txt` からインストールできます）
-- MUCOMVGM コンパイラ `mucomvgm.exe`（別途用意してください）
-
 ## 起動方法
 
-PowerShell を開き、プロジェクトのフォルダーに移動して、次のコマンドを順番に実行します。
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python .\mucomvgm-studio.py
-```
-
-PowerShell の実行ポリシーによって仮想環境の有効化が拒否される場合は、現在の PowerShell セッションに限って、次のコマンドを実行してから有効化してください。
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-```
-
-すでに仮想環境と必要なライブラリを準備している場合は、最後の起動コマンドだけで実行できます。
+mucomvgm-studio.exeを起動する。
 
 ## 基本的な使い方
 
