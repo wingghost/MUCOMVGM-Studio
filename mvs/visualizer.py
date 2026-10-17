@@ -5,7 +5,7 @@ import struct
 import re
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, QTimer, QElapsedTimer
+from PySide6.QtCore import Qt, QTimer, QElapsedTimer, QSize
 from PySide6.QtGui import QColor, QPainter, QPen, QFont
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy
 
@@ -17,6 +17,20 @@ class VgmEvent:
     port: int
     reg: int
     value: int
+    instance: int = 1
+
+
+_CHIP_NAME_RE = re.compile(
+    r"\s*#chip(?:\s+(\d+))?\s+([A-Za-z][A-Za-z0-9_+-]*)",
+    re.IGNORECASE,
+)
+_KNOWN_CHIPS = {"YM2608", "OPNA", "YM2151", "OPM"}
+_CHIP_FAMILY = {
+    "YM2608": ("YM2608", "OPNA"),
+    "OPNA": ("YM2608", "OPNA"),
+    "YM2151": ("YM2151", "OPM"),
+    "OPM": ("YM2151", "OPM"),
+}
 
 
 class PianoRow(QWidget):
@@ -35,6 +49,12 @@ class PianoRow(QWidget):
         # Keep all eight octaves at a readable key width and let the scroll area scroll.
         self.setMinimumWidth(self.LABEL_W + self.WHITE_KEY_COUNT * self.WHITE_KEY_W + 8)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self):
+        return QSize(self.minimumWidth(), self.minimumHeight())
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
 
     def set_notes(self, notes):
         self.notes = set(notes)
@@ -192,26 +212,21 @@ class VgmVisualizer(QWidget):
         self.timer.setInterval(10)
         self.timer.timeout.connect(self._advance)
         self._sample_rate = 44100
-        # Show a usable keyboard immediately, before a VGM has been loaded.
-        # Previously rows were created only by load_vgm(), so the player pane
-        # could contain a completely blank keyboard area until playback setup.
+        self.chip_declarations = ["YM2608"]
         self._build_rows([])
 
     def configure_from_mml(self, mml_text: str):
         """Configure visible chip rows from the MML #chip declarations."""
         found = []
         for line in mml_text.splitlines():
-            match = re.match(r"\s*#chip\s+([A-Za-z0-9_+-]+)", line, re.IGNORECASE)
-            if match:
-                name = match.group(1).upper()
-                if name not in found:
-                    found.append(name)
-                else:
-                    # Preserve repeated declarations as separate visual rows.
-                    found.append(name)
-        # Avoid rebuilding the keyboard widget tree on every Play press.
-        # Recreating child widgets while a QScrollArea is visible can leave its
-        # viewport with stale geometry, making the whole keyboard appear blank.
+            match = _CHIP_NAME_RE.match(line)
+            if not match:
+                continue
+            name = match.group(2).upper()
+            if name in _KNOWN_CHIPS:
+                found.append(name)
+        if not found:
+            found = ["YM2608"]
         if found != self.chip_declarations:
             self.chip_declarations = found
             self._build_rows([])
@@ -253,11 +268,14 @@ class VgmVisualizer(QWidget):
                 else:
                     sample += cmd & 0x0F
                     offset += 1  # YM2612 DAC write byte accompanying the wait
-            elif cmd in (0x56, 0x57, 0x54) and offset + 2 <= len(data):
+            elif cmd in (0x56, 0x57, 0xA6, 0xA7, 0x54, 0xA4) and offset + 2 <= len(data):
                 reg, value = data[offset], data[offset + 1]; offset += 2
-                chip = "YM2151" if cmd == 0x54 else "YM2608"
-                port = 0 if cmd != 0x57 else 1
-                events.append(VgmEvent(sample, chip, port, reg, value))
+                if cmd in (0x54, 0xA4):
+                    events.append(VgmEvent(sample, "YM2151", 0, reg, value, 1 if cmd == 0x54 else 2))
+                else:
+                    port = 0 if cmd in (0x56, 0xA6) else 1
+                    instance = 1 if cmd in (0x56, 0x57) else 2
+                    events.append(VgmEvent(sample, "YM2608", port, reg, value, instance))
             elif cmd == 0x67 and offset + 6 <= len(data):
                 # VGM data block: 66, type, size(4), payload
                 if data[offset] == 0x66:
@@ -339,27 +357,23 @@ class VgmVisualizer(QWidget):
             rhythm_label = QLabel("Rhythm / リズム")
             rhythm_label.setStyleSheet("font-weight: bold; color: #aeb7c4; padding-top: 3px")
             self.rows_layout.addWidget(rhythm_label)
+            self.rhythm.show()
             self.rows_layout.addWidget(self.rhythm)
         self.rows_layout.addStretch(1)
         row_width = max((row.minimumWidth() for row in self.rows.values()), default=900)
-        # Let Qt calculate the content size from the rebuilt layout. Manually
-        # resizing rows_host from a stale sizeHint can collapse the scroll viewport
-        # during the transition from editor setup to playback.
         self.rows_layout.activate()
         content_size = self.rows_layout.sizeHint()
-        # The scroll area owns the host geometry. Keep only the minimum width
-        # needed by the eight-octave keyboard; forcing a minimum height here can
-        # leave the viewport with stale geometry after rows are replaced.
-        self.rows_host.setMinimumWidth(max(row_width, content_size.width()))
-        self.rows_host.setMinimumHeight(max(1, content_size.height()))
+        fallback_h = max(82, len(self.rows) * 82 + 48)
+        host_w = max(row_width, content_size.width(), 1)
+        host_h = max(content_size.height(), fallback_h)
+        self.rows_host.setMinimumWidth(host_w)
+        self.rows_host.setMinimumHeight(host_h)
+        self.rows_host.resize(host_w, host_h)
         self.rows_host.updateGeometry()
-        self.rows_host.adjustSize()
         self.scroll.widget().updateGeometry()
         self.scroll.updateGeometry()
         self.rows_host.update()
         self.scroll.viewport().update()
-        # Re-activate once Qt has processed pending deleteLater() events and
-        # layout invalidations from the old keyboard rows.
         QTimer.singleShot(0, self._refresh_scroll_geometry)
 
     def _refresh_scroll_geometry(self):
@@ -368,7 +382,11 @@ class VgmVisualizer(QWidget):
         self.rows_layout.invalidate()
         self.rows_layout.activate()
         hint = self.rows_layout.sizeHint()
-        self.rows_host.setMinimumSize(max(1, hint.width()), max(1, hint.height()))
+        fallback_h = max(82, len(self.rows) * 82 + 48)
+        host_w = max(1, hint.width(), max((row.minimumWidth() for row in self.rows.values()), default=900))
+        host_h = max(1, hint.height(), fallback_h)
+        self.rows_host.setMinimumSize(host_w, host_h)
+        self.rows_host.resize(host_w, host_h)
         self.rows_host.updateGeometry()
         self.scroll.widget().updateGeometry()
         self.scroll.viewport().update()
@@ -400,90 +418,104 @@ class VgmVisualizer(QWidget):
             # Player may loop; keep the UI from appearing stuck at end of first pass.
             self.timer.stop()
 
+    def _resolve_key(self, chip: str, kind: str, channel: int, instance: int):
+        names = _CHIP_FAMILY.get(chip, (chip,))
+        for name in names:
+            key = (f"{name}@{instance}", kind, channel)
+            if key in self.rows:
+                return key
+        for name in names:
+            key = (f"{name}@1", kind, channel)
+            if key in self.rows:
+                return key
+        return None
+
+    def _set_row_notes(self, key, notes):
+        if key is None or key not in self.rows:
+            return
+        self.active[key] = set(notes)
+        self.rows[key].set_notes(self.active[key])
+
     def _apply_event(self, ev: VgmEvent):
+        inst = ev.instance
         # Track frequency/key-code registers before processing key-on events.
         if ev.chip == "YM2608" and ev.reg in (0xA0, 0xA1, 0xA2, 0xA4, 0xA5, 0xA6):
             channel = (ev.reg & 0x03) + (3 if ev.port == 1 else 0)
             cache = getattr(self, "_fnum2608_parts", {})
-            low, high = cache.get(channel, (0, 0))
+            low, high = cache.get((inst, channel), (0, 0))
             if ev.reg < 0xA4: low = ev.value
             else: high = ev.value
-            cache[channel] = (low, high)
+            cache[(inst, channel)] = (low, high)
             self._fnum2608_parts = cache
             self._fnum2608 = getattr(self, "_fnum2608", {})
-            self._fnum2608[channel] = (((high & 0x07) << 8) | low, (high >> 3) & 0x07)
+            self._fnum2608[(inst, channel)] = (((high & 0x07) << 8) | low, (high >> 3) & 0x07)
         elif ev.chip == "YM2151" and 0x28 <= ev.reg <= 0x2F:
             channel = ev.reg - 0x28
             cache = getattr(self, "_fnum2151", {})
-            # YM2151 key code: octave in upper bits, semitone in lower nibble.
             keycode = ev.value
             semitone_map = {0: 0, 1: 1, 2: 2, 4: 3, 5: 4, 6: 5, 8: 6, 9: 7, 10: 8, 12: 9, 13: 10, 14: 11}
             octave = (keycode >> 4) & 0x07
             semitone = semitone_map.get(keycode & 0x0F, 0)
-            cache[channel] = (semitone, octave)
+            cache[(inst, channel)] = (semitone, octave)
             self._fnum2151 = cache
         if ev.chip == "YM2608":
             if ev.port == 0 and ev.reg == 0x28:
                 ch = ev.value & 0x03
                 if ch == 3: return
                 ch += ((ev.value >> 2) & 1) * 3
-                key = ("YM2608@1", "FM", ch)
-                if key not in self.active: return
+                key = self._resolve_key("YM2608", "FM", ch, inst)
+                if key is None: return
                 if ev.value & 0xF0:
-                    note = self._fm_note_2608(ch)
-                    self.active[key] = {note} if note is not None else set()
+                    note = self._fm_note_2608(inst, ch)
+                    self._set_row_notes(key, {note} if note is not None else set())
                 else:
-                    self.active[key].clear()
-                self.rows[key].set_notes(self.active[key])
+                    self._set_row_notes(key, set())
             elif ev.port == 0 and 0x08 <= ev.reg <= 0x0A:
                 ch = ev.reg - 0x08
-                key = ("YM2608@1", "SSG", ch)
-                if key not in self.active: return
-                # SSG volume register indicates a sounding tone; pitch comes from period registers.
-                period = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])[ch]
+                key = self._resolve_key("YM2608", "SSG", ch, inst)
+                if key is None: return
+                periods = getattr(self, "_ssg_period", {})
+                period = periods.get((inst, ch), 0x100)
                 note = max(0, min(127, round(69 + 12 * math.log2(max(1, 3579545 / (64 * max(1, period))) / 440))))
-                self.active[key] = {note} if (ev.value & 0x0F) else set()
-                self.rows[key].set_notes(self.active[key])
+                self._set_row_notes(key, {note} if (ev.value & 0x0F) else set())
             elif ev.port == 0 and ev.reg in (0x00, 0x02, 0x04):
-                periods = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])
-                periods[ev.reg // 2] = (periods[ev.reg // 2] & 0xF00) | ev.value
+                periods = getattr(self, "_ssg_period", {})
+                idx = ev.reg // 2
+                periods[(inst, idx)] = (periods.get((inst, idx), 0x100) & 0xF00) | ev.value
                 self._ssg_period = periods
             elif ev.port == 0 and ev.reg in (0x01, 0x03, 0x05):
-                periods = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])
+                periods = getattr(self, "_ssg_period", {})
                 idx = ev.reg // 2
-                periods[idx] = (periods[idx] & 0x0FF) | ((ev.value & 0x0F) << 8)
+                periods[(inst, idx)] = (periods.get((inst, idx), 0x100) & 0x0FF) | ((ev.value & 0x0F) << 8)
                 self._ssg_period = periods
             elif ev.port == 1 and ev.reg == 0x10:
                 for i in range(6):
                     if ev.value & (1 << i): self.rhythm.trigger(i)
             elif ev.port == 1 and ev.reg == 0x00:
-                key = ("YM2608@1", "ADPCM", 0)
-                if key in self.active:
-                    if ev.value & 0x80: self.active[key] = {60}
-                    elif ev.value & 0x01: self.active[key] = {60}
-                    else: self.active[key].clear()
-                    self.rows[key].set_notes(self.active[key])
+                key = self._resolve_key("YM2608", "ADPCM", 0, inst)
+                if key is None: return
+                if ev.value & 0x80: self._set_row_notes(key, {60})
+                elif ev.value & 0x01: self._set_row_notes(key, {60})
+                else: self._set_row_notes(key, set())
         elif ev.chip == "YM2151" and ev.reg == 0x08:
             ch = ev.value & 0x07
-            key = ("YM2151@1", "FM", ch)
-            if key not in self.active: return
+            key = self._resolve_key("YM2151", "FM", ch, inst)
+            if key is None: return
             if ev.value & 0x78:
-                note = self._fm_note_2151(ch)
-                self.active[key] = {note} if note is not None else set()
+                note = self._fm_note_2151(inst, ch)
+                self._set_row_notes(key, {note} if note is not None else set())
             else:
-                self.active[key].clear()
-            if key in self.rows: self.rows[key].set_notes(self.active[key])
+                self._set_row_notes(key, set())
 
-    def _fm_note_2608(self, channel):
-        # The VGM stream's most recent F-number/block registers are tracked per channel.
+    def _fm_note_2608(self, instance, channel):
         fnums = getattr(self, "_fnum2608", {})
-        if channel not in fnums: return 60
-        fnum, block = fnums[channel]
+        if (instance, channel) not in fnums: return 60
+        fnum, block = fnums[(instance, channel)]
         freq = 7_987_200 * fnum * (2 ** block) / (144 * 1_048_576)
         return max(0, min(127, round(69 + 12 * math.log2(max(1, freq) / 440))) )
 
-    def _fm_note_2151(self, channel):
+    def _fm_note_2151(self, instance, channel):
         fnums = getattr(self, "_fnum2151", {})
-        if channel not in fnums: return 60
-        semitone, octave = fnums[channel]
+        if (instance, channel) not in fnums: return 60
+        semitone, octave = fnums[(instance, channel)]
         return max(0, min(127, 36 + octave * 12 + semitone))
