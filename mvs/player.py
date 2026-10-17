@@ -56,8 +56,11 @@ class PlayerMixin:
         if not compiler.is_file():
             QMessageBox.warning(self, APP_NAME, self.tr("compiler_missing"))
             return
+        mml_text = self.editor.toPlainText()
+        if hasattr(self, "visualizer"):
+            self.visualizer.configure_from_mml(mml_text)
         try:
-            temp_source.write_text(self.editor.toPlainText(), encoding="utf-8", newline="\n")
+            temp_source.write_text(mml_text, encoding="utf-8", newline="\n")
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, str(exc))
             return
@@ -111,6 +114,8 @@ class PlayerMixin:
             return
         proc = QProcess(self)
         self.player_process = proc
+        if hasattr(self, "visualizer"):
+            self.visualizer.load_vgm(vgm_path)
         proc.setWorkingDirectory(str(vgm_path.parent))
         proc.setProgram(str(player_exe.resolve()))
         proc.setArguments([str(vgm_path.resolve())])
@@ -119,6 +124,8 @@ class PlayerMixin:
         proc.finished.connect(lambda _code, _status, p=proc: self._player_finished(p))
         proc.errorOccurred.connect(lambda error, p=proc: self._player_process_error(p, error, compiling=False))
         proc.start()
+        if hasattr(self, "visualizer"):
+            self.visualizer.start()
         self.player_status_label.setText("再生中" if self.language == "Japanese" else "Playing")
         self.log(("再生開始: " if self.language == "Japanese" else "Playing: ") + str(vgm_path))
 
@@ -141,6 +148,8 @@ class PlayerMixin:
             self.player_process = None
         proc.deleteLater()
         self.player_status_label.setText("停止中" if self.language == "Japanese" else "Stopped")
+        if hasattr(self, "visualizer"):
+            self.visualizer.stop()
         self._cleanup_player_temp_files()
 
 
@@ -154,6 +163,8 @@ class PlayerMixin:
                 self._read_player_process_output(proc)
                 proc.deleteLater()
                 setattr(self, attr, None)
+        if hasattr(self, "visualizer"):
+            self.visualizer.stop()
         if cleanup:
             self._cleanup_player_temp_files()
         if hasattr(self, "player_status_label"):

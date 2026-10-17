@@ -24,6 +24,7 @@ from .config import APP_NAME, BASE_DIR, TEXT, THEMES, read_config, write_config
 from .editor import MmlEditor
 from .explorer import ExplorerFileSystemModel, ExplorerTable
 from .player import PlayerMixin
+from .visualizer import VgmVisualizer
 from .settings_dialog import SettingsDialog
 
 class MainWindow(PlayerMixin, QMainWindow):
@@ -141,7 +142,8 @@ class MainWindow(PlayerMixin, QMainWindow):
         self.player_status_label = QLabel("停止中")
         self.player_status_label.setWordWrap(True)
         player_layout.addWidget(self.player_status_label)
-        player_layout.addStretch(1)
+        self.visualizer = VgmVisualizer(self.player_panel)
+        player_layout.addWidget(self.visualizer, 1)
         self.main_tabs.addTab(self.player_panel, "プレイヤー")
         # Keep the bottom-left corner occupied by the Explorer dock so it extends
         # to the bottom while Output spans only the editor side.

@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+import math
+import struct
+import re
+from dataclasses import dataclass
+
+from PySide6.QtCore import Qt, QTimer, QElapsedTimer
+from PySide6.QtGui import QColor, QPainter, QPen, QFont
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy
+
+
+@dataclass
+class VgmEvent:
+    sample: int
+    chip: str
+    port: int
+    reg: int
+    value: int
+
+
+class PianoRow(QWidget):
+    """Realistic 8-octave piano keyboard; sounding notes are highlighted red."""
+    LOW_NOTE = 24       # C1
+    OCTAVES = 8
+    WHITE_KEY_COUNT = OCTAVES * 7
+    LABEL_W = 86
+    WHITE_KEY_W = 17
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent)
+        self.label = label
+        self.notes: set[int] = set()
+        self.setMinimumHeight(82)
+        # Keep all eight octaves at a readable key width and let the scroll area scroll.
+        self.setMinimumWidth(self.LABEL_W + self.WHITE_KEY_COUNT * self.WHITE_KEY_W + 8)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_notes(self, notes):
+        self.notes = set(notes)
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        label_w = self.LABEL_W
+        top, bottom = 7, self.height() - 5
+        key_h = bottom - top
+        x0 = label_w
+        key_w = self.WHITE_KEY_W
+        black_pc = {1, 3, 6, 8, 10}
+        white_pc = {0, 2, 4, 5, 7, 9, 11}
+
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(0, top, label_w - 8, key_h, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self.label)
+
+        # Draw the 56 white keys first, each with a distinct outline and subtle bottom edge.
+        white_x = {}
+        white_index = 0
+        for midi in range(self.LOW_NOTE, self.LOW_NOTE + self.OCTAVES * 12):
+            pc = midi % 12
+            if pc not in white_pc:
+                continue
+            x = x0 + white_index * key_w
+            white_x[midi] = x
+            rect = (x, top, key_w, key_h)
+            if midi in self.notes:
+                fill = QColor("#e34242")
+            else:
+                fill = QColor("#fffdf7")
+            p.setPen(QPen(QColor("#30343b"), 1))
+            p.setBrush(fill)
+            p.drawRoundedRect(x, top, key_w, key_h, 1.5, 1.5)
+            # Small octave marker at each C key.
+            if pc == 0:
+                p.setPen(QColor("#626873"))
+                p.setFont(QFont("Segoe UI", 7))
+                p.drawText(x, bottom - 14, key_w, 11, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, f"C{midi // 12 - 1}")
+            white_index += 1
+
+        # Black keys overlap the white keys, as on a real piano.
+        black_w = max(8, int(key_w * 0.60))
+        black_h = int(key_h * 0.61)
+        for midi in range(self.LOW_NOTE, self.LOW_NOTE + self.OCTAVES * 12):
+            pc = midi % 12
+            if pc not in black_pc:
+                continue
+            # Locate the white key immediately to the left of this black key.
+            left_white = midi - 1
+            while left_white >= self.LOW_NOTE and left_white not in white_x:
+                left_white -= 1
+            if left_white not in white_x:
+                continue
+            x = white_x[left_white] + key_w - black_w // 2
+            active = midi in self.notes
+            p.setPen(QPen(QColor("#17191e"), 1))
+            p.setBrush(QColor("#e34242") if active else QColor("#242830"))
+            p.drawRoundedRect(x, top, black_w, black_h, 2, 2)
+            if active:
+                p.setPen(QColor("#ffffff"))
+                p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                p.drawText(x, top + 2, black_w, black_h - 3, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, "●")
+
+
+class RhythmStrip(QWidget):
+    """Six compact, finely graduated activity meters for YM2608 rhythm voices."""
+    NAMES = (("BD", 0), ("SD", 1), ("TOP", 2), ("HH", 3), ("TOM", 4), ("RIM", 5))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.levels = [0.0] * 6
+        self.peaks = [0.0] * 6
+        self.setMinimumHeight(43)
+        self.setMaximumHeight(48)
+
+    def trigger(self, instrument: int):
+        if 0 <= instrument < 6:
+            self.levels[instrument] = 1.0
+            self.peaks[instrument] = 1.0
+            self.update()
+
+    def tick(self):
+        changed = False
+        for i in range(6):
+            old = self.levels[i]
+            self.levels[i] = max(0.0, old - 0.035)
+            self.peaks[i] = max(self.levels[i], self.peaks[i] - 0.012)
+            changed |= old != self.levels[i]
+        if changed:
+            self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        margin, gap = 5, 7
+        cell_w = max(58, (self.width() - margin * 2 - gap * 5) // 6)
+        for i, (name, _) in enumerate(self.NAMES):
+            x = margin + i * (cell_w + gap)
+            p.setPen(QColor("#aeb7c4"))
+            p.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+            p.drawText(x, 2, cell_w, 13, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+            bx, by, bw, bh = x, 18, cell_w, 13
+            p.setPen(QPen(QColor("#343b46"), 1))
+            p.setBrush(QColor("#171c24"))
+            p.drawRoundedRect(bx, by, bw, bh, 3, 3)
+            inner_x, inner_y, inner_w, inner_h = bx + 2, by + 2, bw - 4, bh - 4
+            lit_w = int(inner_w * self.levels[i])
+            if lit_w > 0:
+                # Smooth fill with a warm peak region, without pretending to be PCM dB.
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#43d6a3"))
+                p.drawRoundedRect(inner_x, inner_y, lit_w, inner_h, 2, 2)
+                if lit_w > inner_w * 0.72:
+                    p.setBrush(QColor("#f0c35a"))
+                    p.drawRoundedRect(inner_x + int(inner_w * 0.72), inner_y,
+                                      max(0, lit_w - int(inner_w * 0.72)), inner_h, 2, 2)
+            peak_x = inner_x + int(inner_w * self.peaks[i])
+            if self.peaks[i] > 0.02:
+                p.setPen(QPen(QColor("#f5f7fa"), 2))
+                p.drawLine(peak_x, by + 1, peak_x, by + bh - 1)
+
+
+class VgmVisualizer(QWidget):
+    """VGM register-stream visualizer. It displays event activity, not PCM loudness."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.events: list[VgmEvent] = []
+        self.event_index = 0
+        self.elapsed = QElapsedTimer()
+        self.rows: dict[tuple[str, str, int], PianoRow] = {}
+        self.active: dict[tuple[str, str, int], set[int]] = {}
+        self.chip_declarations: list[str] = []
+        self.rhythm = RhythmStrip()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(3)
+        title = QLabel("発音モニター / Note Activity")
+        title.setStyleSheet("font-weight: bold")
+        layout.addWidget(title)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.rows_host = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(3)
+        self.scroll.setWidget(self.rows_host)
+        layout.addWidget(self.scroll, 1)
+        self.timer = QTimer(self)
+        self.timer.setInterval(10)
+        self.timer.timeout.connect(self._advance)
+        self._sample_rate = 44100
+        # Show a usable keyboard immediately, before a VGM has been loaded.
+        # Previously rows were created only by load_vgm(), so the player pane
+        # could contain a completely blank keyboard area until playback setup.
+        self._build_rows([])
+
+    def configure_from_mml(self, mml_text: str):
+        """Configure visible chip rows from the MML #chip declarations."""
+        found = []
+        for line in mml_text.splitlines():
+            match = re.match(r"\s*#chip\s+([A-Za-z0-9_+-]+)", line, re.IGNORECASE)
+            if match:
+                name = match.group(1).upper()
+                if name not in found:
+                    found.append(name)
+                else:
+                    # Preserve repeated declarations as separate visual rows.
+                    found.append(name)
+        # Avoid rebuilding the keyboard widget tree on every Play press.
+        # Recreating child widgets while a QScrollArea is visible can leave its
+        # viewport with stale geometry, making the whole keyboard appear blank.
+        if found != self.chip_declarations:
+            self.chip_declarations = found
+            self._build_rows([])
+
+    @staticmethod
+    def _u32(data: bytes, offset: int) -> int:
+        return struct.unpack_from('<I', data, offset)[0] if offset + 4 <= len(data) else 0
+
+    def load_vgm(self, path):
+        try:
+            data = open(path, 'rb').read()
+        except OSError:
+            self.events = []
+            return
+        if len(data) < 0x40 or data[:4] != b'Vgm ':
+            self.events = []
+            return
+        version = self._u32(data, 8)
+        offset = 0x40
+        rel = self._u32(data, 0x34) if version >= 0x150 and len(data) >= 0x38 else 0
+        if rel:
+            offset = 0x34 + rel
+        sample = 0
+        events = []
+        while offset < len(data):
+            cmd = data[offset]
+            offset += 1
+            if cmd == 0x66:
+                break
+            if cmd == 0x61 and offset + 2 <= len(data):
+                sample += data[offset] | (data[offset + 1] << 8); offset += 2
+            elif cmd == 0x62:
+                sample += 735
+            elif cmd == 0x63:
+                sample += 882
+            elif 0x70 <= cmd <= 0x8F:
+                if cmd <= 0x7F:
+                    sample += (cmd & 0x0F) + 1
+                else:
+                    sample += cmd & 0x0F
+                    offset += 1  # YM2612 DAC write byte accompanying the wait
+            elif cmd in (0x56, 0x57, 0x54) and offset + 2 <= len(data):
+                reg, value = data[offset], data[offset + 1]; offset += 2
+                chip = "YM2151" if cmd == 0x54 else "YM2608"
+                port = 0 if cmd != 0x57 else 1
+                events.append(VgmEvent(sample, chip, port, reg, value))
+            elif cmd == 0x67 and offset + 6 <= len(data):
+                # VGM data block: 66, type, size(4), payload
+                if data[offset] == 0x66:
+                    size = self._u32(data, offset + 2)
+                    offset += 6 + size
+                else:
+                    break
+            elif cmd in (0x4F, 0x50):
+                offset += 1
+            elif cmd in (0x51, 0x52, 0x53, 0x55, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F):
+                offset += 2
+            elif cmd in (0xA0, 0xB0):
+                offset += 2
+            elif cmd in (0xC0, 0xC1, 0xC2, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4):
+                offset += 3
+            elif cmd == 0xE0:
+                offset += 4
+            elif cmd == 0x90:
+                offset += 4
+            elif cmd == 0x91:
+                offset += 4
+            elif cmd == 0x92:
+                offset += 5
+            elif cmd == 0x93:
+                offset += 10
+            elif cmd == 0x94:
+                offset += 1
+            elif cmd == 0x95:
+                offset += 4
+            elif cmd in (0x30, 0x3F):
+                offset += 1
+            elif 0xA1 <= cmd <= 0xBF or 0xC3 <= cmd <= 0xCF or 0xD5 <= cmd <= 0xDF:
+                offset += 2
+            else:
+                # Unknown command; stop instead of risking a desynchronized parse.
+                break
+        self.events = events
+        # Keep the keyboard widgets stable during playback. Rebuilding them
+        # here caused the visible keyboard to vanish when the VGM was loaded.
+
+    def _build_rows(self, events):
+        # Rebuild only when the source's #chip declarations change, never on playback ticks.
+        # IMPORTANT: self.rhythm is a persistent widget. Do not deleteLater() it here:
+        # this method reuses that same instance when adding the rhythm strip back.
+        for i in reversed(range(self.rows_layout.count())):
+            item = self.rows_layout.takeAt(i)
+            widget = item.widget()
+            if widget is not None:
+                self.rows_layout.removeWidget(widget)
+                if widget is self.rhythm:
+                    widget.hide()
+                    continue
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        self.rows.clear()
+        self.active.clear()
+        declarations = self.chip_declarations or ["YM2608"]
+        counts = {}
+        ordered = []
+        for chip_name in declarations:
+            counts[chip_name] = counts.get(chip_name, 0) + 1
+            instance = counts[chip_name]
+            display = chip_name if counts[chip_name] == 1 else f"{chip_name} #{instance}"
+            if chip_name in ("YM2608", "OPNA"):
+                ordered.extend((f"{chip_name}@{instance}", display, "FM", i) for i in range(6))
+                ordered.extend((f"{chip_name}@{instance}", display, "SSG", i) for i in range(3))
+                ordered.append((f"{chip_name}@{instance}", display, "ADPCM", 0))
+                # Rhythm meter is added once below all keyboard rows.
+            elif chip_name in ("YM2151", "OPM"):
+                ordered.extend((f"{chip_name}@{instance}", display, "FM", i) for i in range(8))
+        for key_chip, display, kind, channel in ordered:
+            row = PianoRow(f"{display} {kind} {channel + 1}")
+            key = (key_chip, kind, channel)
+            self.rows[key] = row
+            self.active[key] = set()
+            self.rows_layout.addWidget(row)
+        if any(name in ("YM2608", "OPNA") for name in declarations):
+            rhythm_label = QLabel("Rhythm / リズム")
+            rhythm_label.setStyleSheet("font-weight: bold; color: #aeb7c4; padding-top: 3px")
+            self.rows_layout.addWidget(rhythm_label)
+            self.rows_layout.addWidget(self.rhythm)
+        self.rows_layout.addStretch(1)
+        row_width = max((row.minimumWidth() for row in self.rows.values()), default=900)
+        # Let Qt calculate the content size from the rebuilt layout. Manually
+        # resizing rows_host from a stale sizeHint can collapse the scroll viewport
+        # during the transition from editor setup to playback.
+        self.rows_layout.activate()
+        content_size = self.rows_layout.sizeHint()
+        # The scroll area owns the host geometry. Keep only the minimum width
+        # needed by the eight-octave keyboard; forcing a minimum height here can
+        # leave the viewport with stale geometry after rows are replaced.
+        self.rows_host.setMinimumWidth(max(row_width, content_size.width()))
+        self.rows_host.setMinimumHeight(max(1, content_size.height()))
+        self.rows_host.updateGeometry()
+        self.rows_host.adjustSize()
+        self.scroll.widget().updateGeometry()
+        self.scroll.updateGeometry()
+        self.rows_host.update()
+        self.scroll.viewport().update()
+        # Re-activate once Qt has processed pending deleteLater() events and
+        # layout invalidations from the old keyboard rows.
+        QTimer.singleShot(0, self._refresh_scroll_geometry)
+
+    def _refresh_scroll_geometry(self):
+        if not self.rows_host or not self.scroll:
+            return
+        self.rows_layout.invalidate()
+        self.rows_layout.activate()
+        hint = self.rows_layout.sizeHint()
+        self.rows_host.setMinimumSize(max(1, hint.width()), max(1, hint.height()))
+        self.rows_host.updateGeometry()
+        self.scroll.widget().updateGeometry()
+        self.scroll.viewport().update()
+        self.rows_host.update()
+
+    def start(self):
+        self.event_index = 0
+        for key in self.active:
+            self.active[key].clear()
+        for row in self.rows.values(): row.set_notes(set())
+        self.rhythm.levels = [0] * 6
+        self.elapsed.start()
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+        for key in self.active: self.active[key].clear()
+        for row in self.rows.values(): row.set_notes(set())
+        self.rhythm.levels = [0] * 6
+        self.rhythm.update()
+
+    def _advance(self):
+        now_samples = self.elapsed.elapsed() * self._sample_rate // 1000
+        while self.event_index < len(self.events) and self.events[self.event_index].sample <= now_samples:
+            self._apply_event(self.events[self.event_index])
+            self.event_index += 1
+        self.rhythm.tick()
+        if self.event_index >= len(self.events):
+            # Player may loop; keep the UI from appearing stuck at end of first pass.
+            self.timer.stop()
+
+    def _apply_event(self, ev: VgmEvent):
+        # Track frequency/key-code registers before processing key-on events.
+        if ev.chip == "YM2608" and ev.reg in (0xA0, 0xA1, 0xA2, 0xA4, 0xA5, 0xA6):
+            channel = (ev.reg & 0x03) + (3 if ev.port == 1 else 0)
+            cache = getattr(self, "_fnum2608_parts", {})
+            low, high = cache.get(channel, (0, 0))
+            if ev.reg < 0xA4: low = ev.value
+            else: high = ev.value
+            cache[channel] = (low, high)
+            self._fnum2608_parts = cache
+            self._fnum2608 = getattr(self, "_fnum2608", {})
+            self._fnum2608[channel] = (((high & 0x07) << 8) | low, (high >> 3) & 0x07)
+        elif ev.chip == "YM2151" and 0x28 <= ev.reg <= 0x2F:
+            channel = ev.reg - 0x28
+            cache = getattr(self, "_fnum2151", {})
+            # YM2151 key code: octave in upper bits, semitone in lower nibble.
+            keycode = ev.value
+            semitone_map = {0: 0, 1: 1, 2: 2, 4: 3, 5: 4, 6: 5, 8: 6, 9: 7, 10: 8, 12: 9, 13: 10, 14: 11}
+            octave = (keycode >> 4) & 0x07
+            semitone = semitone_map.get(keycode & 0x0F, 0)
+            cache[channel] = (semitone, octave)
+            self._fnum2151 = cache
+        if ev.chip == "YM2608":
+            if ev.port == 0 and ev.reg == 0x28:
+                ch = ev.value & 0x03
+                if ch == 3: return
+                ch += ((ev.value >> 2) & 1) * 3
+                key = ("YM2608@1", "FM", ch)
+                if key not in self.active: return
+                if ev.value & 0xF0:
+                    note = self._fm_note_2608(ch)
+                    self.active[key] = {note} if note is not None else set()
+                else:
+                    self.active[key].clear()
+                self.rows[key].set_notes(self.active[key])
+            elif ev.port == 0 and 0x08 <= ev.reg <= 0x0A:
+                ch = ev.reg - 0x08
+                key = ("YM2608@1", "SSG", ch)
+                if key not in self.active: return
+                # SSG volume register indicates a sounding tone; pitch comes from period registers.
+                period = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])[ch]
+                note = max(0, min(127, round(69 + 12 * math.log2(max(1, 3579545 / (64 * max(1, period))) / 440))))
+                self.active[key] = {note} if (ev.value & 0x0F) else set()
+                self.rows[key].set_notes(self.active[key])
+            elif ev.port == 0 and ev.reg in (0x00, 0x02, 0x04):
+                periods = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])
+                periods[ev.reg // 2] = (periods[ev.reg // 2] & 0xF00) | ev.value
+                self._ssg_period = periods
+            elif ev.port == 0 and ev.reg in (0x01, 0x03, 0x05):
+                periods = getattr(self, "_ssg_period", [0x100, 0x100, 0x100])
+                idx = ev.reg // 2
+                periods[idx] = (periods[idx] & 0x0FF) | ((ev.value & 0x0F) << 8)
+                self._ssg_period = periods
+            elif ev.port == 1 and ev.reg == 0x10:
+                for i in range(6):
+                    if ev.value & (1 << i): self.rhythm.trigger(i)
+            elif ev.port == 1 and ev.reg == 0x00:
+                key = ("YM2608@1", "ADPCM", 0)
+                if key in self.active:
+                    if ev.value & 0x80: self.active[key] = {60}
+                    elif ev.value & 0x01: self.active[key] = {60}
+                    else: self.active[key].clear()
+                    self.rows[key].set_notes(self.active[key])
+        elif ev.chip == "YM2151" and ev.reg == 0x08:
+            ch = ev.value & 0x07
+            key = ("YM2151@1", "FM", ch)
+            if key not in self.active: return
+            if ev.value & 0x78:
+                note = self._fm_note_2151(ch)
+                self.active[key] = {note} if note is not None else set()
+            else:
+                self.active[key].clear()
+            if key in self.rows: self.rows[key].set_notes(self.active[key])
+
+    def _fm_note_2608(self, channel):
+        # The VGM stream's most recent F-number/block registers are tracked per channel.
+        fnums = getattr(self, "_fnum2608", {})
+        if channel not in fnums: return 60
+        fnum, block = fnums[channel]
+        freq = 7_987_200 * fnum * (2 ** block) / (144 * 1_048_576)
+        return max(0, min(127, round(69 + 12 * math.log2(max(1, freq) / 440))) )
+
+    def _fm_note_2151(self, channel):
+        fnums = getattr(self, "_fnum2151", {})
+        if channel not in fnums: return 60
+        semitone, octave = fnums[channel]
+        return max(0, min(127, 36 + octave * 12 + semitone))
