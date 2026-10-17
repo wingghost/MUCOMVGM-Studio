@@ -39,15 +39,17 @@ class PianoRow(QWidget):
     OCTAVES = 8
     WHITE_KEY_COUNT = OCTAVES * 7
     LABEL_W = 86
-    WHITE_KEY_W = 17
+    WHITE_KEY_W = 8
 
     def __init__(self, label: str, parent=None):
         super().__init__(parent)
         self.label = label
         self.notes: set[int] = set()
-        self.setMinimumHeight(82)
+        self.meter = LevelMeter(self)
+        self.level = 0.0
+        self.setMinimumHeight(42)
         # Keep all eight octaves at a readable key width and let the scroll area scroll.
-        self.setMinimumWidth(self.LABEL_W + self.WHITE_KEY_COUNT * self.WHITE_KEY_W + 8)
+        self.setMinimumWidth(self.LABEL_W + self.WHITE_KEY_COUNT * self.WHITE_KEY_W + 22)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def sizeHint(self):
@@ -64,7 +66,7 @@ class PianoRow(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         label_w = self.LABEL_W
-        top, bottom = 7, self.height() - 5
+        top, bottom = 3, self.height() - 3
         key_h = bottom - top
         x0 = label_w
         key_w = self.WHITE_KEY_W
@@ -72,7 +74,9 @@ class PianoRow(QWidget):
         white_pc = {0, 2, 4, 5, 7, 9, 11}
 
         p.setPen(self.palette().color(self.foregroundRole()))
-        p.drawText(0, top, label_w - 8, key_h, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self.label)
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+        p.drawText(0, top, label_w - 8, key_h, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, self.label.replace("\n", "\n"))
+        self.meter.move(self.width() - self.meter.width() - 2, (self.height() - self.meter.height()) // 2)
 
         # Draw the 56 white keys first, each with a distinct outline and subtle bottom edge.
         white_x = {}
@@ -94,12 +98,12 @@ class PianoRow(QWidget):
             # Small octave marker at each C key.
             if pc == 0:
                 p.setPen(QColor("#626873"))
-                p.setFont(QFont("Segoe UI", 7))
+                p.setFont(QFont("Segoe UI", 6))
                 p.drawText(x, bottom - 14, key_w, 11, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, f"C{midi // 12 - 1}")
             white_index += 1
 
         # Black keys overlap the white keys, as on a real piano.
-        black_w = max(8, int(key_w * 0.60))
+        black_w = max(4, int(key_w * 0.60))
         black_h = int(key_h * 0.61)
         for midi in range(self.LOW_NOTE, self.LOW_NOTE + self.OCTAVES * 12):
             pc = midi % 12
@@ -118,8 +122,36 @@ class PianoRow(QWidget):
             p.drawRoundedRect(x, top, black_w, black_h, 2, 2)
             if active:
                 p.setPen(QColor("#ffffff"))
-                p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
                 p.drawText(x, top + 2, black_w, black_h - 3, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, "●")
+
+
+class LevelMeter(QWidget):
+    """Compact vertical event-level meter (estimated from carrier TL, not PCM)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.level = 0.0
+        self.setFixedSize(13, 34)
+
+    def set_level(self, level):
+        level = max(0.0, min(1.0, float(level)))
+        if abs(self.level - level) > 0.005:
+            self.level = level
+            self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor("#343b46"), 1))
+        p.setBrush(QColor("#171c24"))
+        p.drawRoundedRect(1, 1, self.width()-2, self.height()-2, 3, 3)
+        inner_h = self.height() - 6
+        lit_h = int(inner_h * self.level)
+        if lit_h:
+            color = QColor("#e65a5a") if self.level > .85 else QColor("#43d6a3")
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(3, self.height()-3-lit_h, self.width()-6, lit_h, 2, 2)
 
 
 class RhythmStrip(QWidget):
@@ -130,8 +162,10 @@ class RhythmStrip(QWidget):
         super().__init__(parent)
         self.levels = [0.0] * 6
         self.peaks = [0.0] * 6
-        self.setMinimumHeight(43)
-        self.setMaximumHeight(48)
+        self.setMinimumHeight(42)
+        self.setMaximumHeight(42)
+        self.setMinimumWidth(PianoRow.LABEL_W + PianoRow.WHITE_KEY_COUNT * PianoRow.WHITE_KEY_W + 22)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
     def trigger(self, instrument: int):
         if 0 <= instrument < 6:
@@ -152,14 +186,19 @@ class RhythmStrip(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        margin, gap = 5, 7
-        cell_w = max(58, (self.width() - margin * 2 - gap * 5) // 6)
+        label_w = PianoRow.LABEL_W
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+        p.drawText(0, 3, label_w - 8, self.height() - 6, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "YM2608\nRhythm")
+        margin, gap = label_w + 3, 4
+        available = max(6, self.width() - margin - 3)
+        cell_w = max(1, (available - gap * 5) // 6)
         for i, (name, _) in enumerate(self.NAMES):
             x = margin + i * (cell_w + gap)
             p.setPen(QColor("#aeb7c4"))
-            p.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
-            p.drawText(x, 2, cell_w, 13, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
-            bx, by, bw, bh = x, 18, cell_w, 13
+            p.setFont(QFont("Segoe UI", 6, QFont.Weight.DemiBold))
+            p.drawText(x, 2, cell_w, 11, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, name)
+            bx, by, bw, bh = x, 15, cell_w, 11
             p.setPen(QPen(QColor("#343b46"), 1))
             p.setBrush(QColor("#171c24"))
             p.drawRoundedRect(bx, by, bw, bh, 3, 3)
@@ -212,6 +251,7 @@ class VgmVisualizer(QWidget):
         self.timer.setInterval(10)
         self.timer.timeout.connect(self._advance)
         self._sample_rate = 44100
+        self._total_samples = 0
         self.chip_declarations = ["YM2608"]
         self._build_rows([])
 
@@ -313,6 +353,7 @@ class VgmVisualizer(QWidget):
                 # Unknown command; stop instead of risking a desynchronized parse.
                 break
         self.events = events
+        self._total_samples = sample
         # Keep the keyboard widgets stable during playback. Rebuilding them
         # here caused the visible keyboard to vanish when the VGM was loaded.
 
@@ -344,26 +385,29 @@ class VgmVisualizer(QWidget):
                 ordered.extend((f"{chip_name}@{instance}", display, "FM", i) for i in range(6))
                 ordered.extend((f"{chip_name}@{instance}", display, "SSG", i) for i in range(3))
                 ordered.append((f"{chip_name}@{instance}", display, "ADPCM", 0))
+                ordered.extend((f"{chip_name}@{instance}", display, "EFFECT", i) for i in range(3))
                 # Rhythm meter is added once below all keyboard rows.
             elif chip_name in ("YM2151", "OPM"):
                 ordered.extend((f"{chip_name}@{instance}", display, "FM", i) for i in range(8))
         for key_chip, display, kind, channel in ordered:
-            row = PianoRow(f"{display} {kind} {channel + 1}")
+            if kind == "EFFECT":
+                effect_name = ("L", "M", "N")[channel]
+                row_label = f"{display}\nFM3-{channel + 2}"
+            else:
+                row_label = f"{display}\n{kind} {channel + 1}"
+            row = PianoRow(row_label)
             key = (key_chip, kind, channel)
             self.rows[key] = row
             self.active[key] = set()
             self.rows_layout.addWidget(row)
         if any(name in ("YM2608", "OPNA") for name in declarations):
-            rhythm_label = QLabel("Rhythm / リズム")
-            rhythm_label.setStyleSheet("font-weight: bold; color: #aeb7c4; padding-top: 3px")
-            self.rows_layout.addWidget(rhythm_label)
             self.rhythm.show()
             self.rows_layout.addWidget(self.rhythm)
         self.rows_layout.addStretch(1)
         row_width = max((row.minimumWidth() for row in self.rows.values()), default=900)
         self.rows_layout.activate()
         content_size = self.rows_layout.sizeHint()
-        fallback_h = max(82, len(self.rows) * 82 + 48)
+        fallback_h = max(42, len(self.rows) * 42 + 42)
         host_w = max(row_width, content_size.width(), 1)
         host_h = max(content_size.height(), fallback_h)
         self.rows_host.setMinimumWidth(host_w)
@@ -382,7 +426,7 @@ class VgmVisualizer(QWidget):
         self.rows_layout.invalidate()
         self.rows_layout.activate()
         hint = self.rows_layout.sizeHint()
-        fallback_h = max(82, len(self.rows) * 82 + 48)
+        fallback_h = max(42, len(self.rows) * 42 + 42)
         host_w = max(1, hint.width(), max((row.minimumWidth() for row in self.rows.values()), default=900))
         host_h = max(1, hint.height(), fallback_h)
         self.rows_host.setMinimumSize(host_w, host_h)
@@ -396,7 +440,10 @@ class VgmVisualizer(QWidget):
         self.event_index = 0
         for key in self.active:
             self.active[key].clear()
-        for row in self.rows.values(): row.set_notes(set())
+        for row in self.rows.values():
+            row.set_notes(set())
+            row.level = 0.0
+            row.meter.set_level(0.0)
         self.rhythm.levels = [0] * 6
         self.elapsed.start()
         self.timer.start()
@@ -404,7 +451,10 @@ class VgmVisualizer(QWidget):
     def stop(self):
         self.timer.stop()
         for key in self.active: self.active[key].clear()
-        for row in self.rows.values(): row.set_notes(set())
+        for row in self.rows.values():
+            row.set_notes(set())
+            row.level = 0.0
+            row.meter.set_level(0.0)
         self.rhythm.levels = [0] * 6
         self.rhythm.update()
 
@@ -414,9 +464,22 @@ class VgmVisualizer(QWidget):
             self._apply_event(self.events[self.event_index])
             self.event_index += 1
         self.rhythm.tick()
-        if self.event_index >= len(self.events):
-            # Player may loop; keep the UI from appearing stuck at end of first pass.
-            self.timer.stop()
+        for row in self.rows.values():
+            if not row.notes:
+                row.level = max(0.0, row.level - 0.018)
+                row.meter.set_level(row.level)
+        # libvgm can loop the VGM indefinitely. Keep replaying the parsed event
+        # stream instead of stopping the visualizer after its first pass.
+        if self.events and self._total_samples > 0 and now_samples >= self._total_samples:
+            self.event_index = 0
+            self.elapsed.restart()
+            for key in self.active:
+                self.active[key].clear()
+            for row in self.rows.values():
+                row.set_notes(set())
+            self.rhythm.levels = [0.0] * 6
+            self.rhythm.peaks = [0.0] * 6
+            self.rhythm.update()
 
     def _resolve_key(self, chip: str, kind: str, channel: int, instance: int):
         names = _CHIP_FAMILY.get(chip, (chip,))
@@ -435,8 +498,43 @@ class VgmVisualizer(QWidget):
             return
         self.active[key] = set(notes)
         self.rows[key].set_notes(self.active[key])
+        if notes:
+            self.rows[key].level = self._estimate_row_level(key)
+            self.rows[key].meter.set_level(self.rows[key].level)
+
+    def _estimate_row_level(self, key):
+        """Estimate carrier loudness from most recently seen TL writes; 0..1."""
+        tls = getattr(self, "_carrier_tl", {})
+        values = tls.get(key, [])
+        if not values:
+            return 0.72
+        attenuation = sum(values) / len(values)
+        return max(0.06, min(1.0, 1.0 - attenuation / 127.0))
+
+    def _track_tl(self, ev):
+        # Keep TL values as per-channel estimates. FM channel/operator register
+        # layouts differ by chip, so this is intentionally conservative.
+        if ev.chip == "YM2608" and 0x40 <= ev.reg <= 0x4F:
+            ch = ev.reg & 0x03
+            if ch == 3:
+                return
+            ch += ((ev.reg >> 2) & 1) * 3
+            key = self._resolve_key("YM2608", "FM", ch, ev.instance)
+        elif ev.chip == "YM2151" and 0x60 <= ev.reg <= 0x7F:
+            ch = ev.reg & 0x07
+            key = self._resolve_key("YM2151", "FM", ch, ev.instance)
+        else:
+            return
+        if key is not None:
+            cache = getattr(self, "_carrier_tl", {})
+            # TL is 7-bit; keep latest four operator values for a stable estimate.
+            vals = cache.setdefault(key, [0, 0, 0, 0])
+            op = (ev.reg >> 2) & 0x03
+            vals[op] = ev.value & 0x7F
+            self._carrier_tl = cache
 
     def _apply_event(self, ev: VgmEvent):
+        self._track_tl(ev)
         inst = ev.instance
         # Track frequency/key-code registers before processing key-on events.
         if ev.chip == "YM2608" and ev.reg in (0xA0, 0xA1, 0xA2, 0xA4, 0xA5, 0xA6):
@@ -488,7 +586,7 @@ class VgmVisualizer(QWidget):
                 idx = ev.reg // 2
                 periods[(inst, idx)] = (periods.get((inst, idx), 0x100) & 0x0FF) | ((ev.value & 0x0F) << 8)
                 self._ssg_period = periods
-            elif ev.port == 1 and ev.reg == 0x10:
+            elif ev.port == 0 and ev.reg == 0x10:
                 for i in range(6):
                     if ev.value & (1 << i): self.rhythm.trigger(i)
             elif ev.port == 1 and ev.reg == 0x00:
