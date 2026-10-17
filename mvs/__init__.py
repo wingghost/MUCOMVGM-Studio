@@ -1,0 +1,1 @@
+"""MUCOMVGM Studio application modules."""
